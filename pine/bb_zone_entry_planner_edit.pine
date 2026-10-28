@@ -149,27 +149,50 @@ f_cross(float a0, float b0, float a1, float b1) =>
             hit := true
     [hit, y]
 
-// 由低到高掃描，同色線在「當前 ATR × zoneAtrMult」的寬度內達 zoneMin 條即成立一個密集區
-// （最下面那條到最上面那條超過 ATR 就不算密集區）；名稱依價位由低到高為 藍1、藍2…
+// 找最密集的同色線：在「當前 ATR × zoneAtrMult」的寬度內，先取線最多的一組（一樣多就取較窄的），
+// 把這組拿掉後再找下一組，直到剩下的每一組都不到 zoneMin 條；最後依價位由低到高排列
+// （密集區的條數沒有上限，最下面那條到最上面那條不能超過 ATR）
 f_zones(array<float> px, int dir) =>
-    array<Zone> out = array.new<Zone>()
     array<float> s = array.copy(px)
     array.sort(s, order.ascending)
     int n = array.size(s)
-    int i = 0
-    while i < n
-        float p0 = array.get(s, i)
-        int j = i
-        while j + 1 < n
-            if array.get(s, j + 1) - p0 > atr * zoneAtrMult
-                break
-            j += 1
-        if j - i + 1 >= zoneMin
-            string nm = (dir == -1 ? "藍" : "紅") + str.tostring(array.size(out) + 1)
-            array.push(out, Zone.new(p0, array.get(s, j), j - i + 1, dir, nm))
-            i := j + 1
+    float w = atr * zoneAtrMult
+    array<bool> used = array.new<bool>(n, false)
+    array<Zone> found = array.new<Zone>()
+    bool more = n >= zoneMin
+    while more
+        int bestI = -1
+        int bestJ = -1
+        float bestSpan = na
+        for i = 0 to n - 1
+            if not array.get(used, i)
+                int j = i
+                while j + 1 < n
+                    if array.get(used, j + 1) or array.get(s, j + 1) - array.get(s, i) > w
+                        break
+                    j += 1
+                int cnt = j - i + 1
+                float span = array.get(s, j) - array.get(s, i)
+                if bestI < 0 or cnt > bestJ - bestI + 1 or (cnt == bestJ - bestI + 1 and span < bestSpan)
+                    bestI := i
+                    bestJ := j
+                    bestSpan := span
+        if bestI < 0 or bestJ - bestI + 1 < zoneMin
+            more := false
         else
-            i += 1
+            array.push(found, Zone.new(array.get(s, bestI), array.get(s, bestJ), bestJ - bestI + 1, dir))
+            for k = bestI to bestJ
+                array.set(used, k, true)
+    array<Zone> out = array.new<Zone>()
+    if array.size(found) > 0
+        array<float> bots = array.new<float>()
+        for z in found
+            array.push(bots, z.bot)
+        array<int> zIdx = array.sort_indices(bots, order.ascending)
+        for idx in zIdx
+            Zone fz = array.get(found, idx)
+            fz.name := (dir == -1 ? "藍" : "紅") + str.tostring(array.size(out) + 1)
+            array.push(out, fz)
     out
 
 f_filterZones(array<Zone> zs, array<string> hideZ) =>
