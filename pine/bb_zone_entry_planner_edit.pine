@@ -1,0 +1,525 @@
+//@version=6
+indicator("密集區空間區進場規劃（編號控制）", overlay=true, max_lines_count=500, max_boxes_count=100, max_labels_count=500, max_bars_back=500)
+
+// 依「雙時間框布林帶交叉投影」的交叉線找出：
+// 1) 密集區（防守帶）：同色交叉線 ≥ N 條，且最下面與最上面那條的距離 ≤ 當前 H4 ATR。藍＝空單防守、紅＝多單防守。
+// 2) 空間區（目標帶）：進場到目標之間不能有任何密集區，異色線不能太多。
+// 3) 依風控規則算出 Sell Limit / Buy Limit 的進場、止損、目標，列在資訊表。
+// 編號控制：每條交叉線都有固定編號（B＝藍、R＝紅，後面是交叉那根 K 棒的「月日-時」，例如 B0519-09），
+// 在設定「個別控制」裡用編號隱藏、改價位、改顏色；密集區用名稱（藍1、紅2）隱藏，也可以自訂密集區；
+// 進場、止損、目標也能在設定裡個別覆寫，指標會重新檢查是否符合規則。
+// 1 點 = syminfo.mintick（GBPCAD 為 0.00001）。請在 H4 圖表使用。
+
+gX = "交叉線"
+bbLen      = input.int(20, "布林帶長度", minval=1, group=gX)
+bbMult     = input.float(2.0, "標準差倍數", minval=0.1, step=0.1, group=gX)
+secTf      = input.timeframe("15", "第二組時間框", group=gX)
+dayWindow  = input.int(15, "交叉時間範圍（最近幾根日K）", minval=1, maxval=80, group=gX)
+showRays   = input.bool(true, "顯示交叉射線", group=gX)
+showRayLbl = input.bool(true, "射線標上編號與價位", group=gX)
+
+gZ = "密集區／空間區"
+zoneMin     = input.int(4, "密集區最少同色線數", minval=2, group=gZ)
+zoneAtrMult = input.float(1.0, "密集區寬度上限（ATR 倍數）", minval=0.1, step=0.1, group=gZ)
+maxOpp      = input.int(2, "空間區內異色線上限", minval=0, group=gZ)
+showZones   = input.bool(true, "顯示密集區", group=gZ)
+
+gC = "個別控制（用圖上的編號，多個用逗號隔開）"
+hideRays    = input.string("", "隱藏交叉線（例：B0519-09, R0520-13）", group=gC)
+moveRays    = input.string("", "修改交叉線價位（例：B0519-09=1.86500）", group=gC)
+recolorRays = input.string("", "交叉線改色（例：B0519-09=紅）", group=gC)
+applyEdits  = input.bool(true, "修改後的線也套用到密集區／空間區判斷", group=gC)
+showHidden  = input.bool(false, "用灰色虛線顯示已隱藏的線", group=gC)
+hideZones   = input.string("", "隱藏密集區（例：藍1, 紅2）", group=gC)
+addZones    = input.string("", "自訂密集區（例：1.86400-1.86700藍, 1.85500-1.85700紅）", group=gC)
+
+gO = "進場覆寫（0＝用自動值）"
+sEntryIn = input.float(0, "空單進場", minval=0, inline="S1", group=gO)
+sSLIn    = input.float(0, "止損", minval=0, inline="S1", group=gO)
+sTPIn    = input.float(0, "目標", minval=0, inline="S1", group=gO)
+lEntryIn = input.float(0, "多單進場", minval=0, inline="L1", group=gO)
+lSLIn    = input.float(0, "止損", minval=0, inline="L1", group=gO)
+lTPIn    = input.float(0, "目標", minval=0, inline="L1", group=gO)
+
+gE = "進場"
+entryMode   = input.string("自動", "進場價", options=["自動", "M15布林", "密集區邊緣", "密集區中間"], group=gE)
+entryOffPts = input.int(10, "邊緣進場偏移（點）", minval=0, group=gE)
+m15NearPts  = input.int(100, "M15布林離防守區最遠距離（點）", minval=0, group=gE)
+
+gR = "風控"
+minStopPts = input.int(200, "止損下限（點）", minval=1, group=gR)
+maxStopPts = input.int(400, "止損上限（點）", minval=1, group=gR)
+atrLen     = input.int(14, "ATR 長度", minval=1, group=gR)
+slBufPts   = input.int(50, "止損超出密集區（點）", minval=0, group=gR)
+rr         = input.float(2.0, "損益比 1:", minval=0.5, step=0.5, group=gR)
+showBE     = input.bool(true, "顯示 1R 保本線（方案A）", group=gR)
+acctSize   = input.float(10000, "本金", minval=0, group=gR)
+acctCcy    = input.string("USD", "本金幣別", options=["USD", "EUR", "GBP", "CAD", "JPY", "AUD", "TWD"], group=gR)
+riskPct    = input.float(1.0, "單筆風險 %", minval=0.1, maxval=5, step=0.1, group=gR)
+
+gD = "顯示"
+showPlan     = input.bool(true, "畫出規劃框", group=gD)
+planBars     = input.int(30, "規劃框長度（K棒）", minval=5, maxval=200, group=gD)
+showTable    = input.bool(true, "顯示進場資訊表", group=gD)
+showZoneList = input.bool(true, "顯示密集區清單", group=gD)
+showRayList  = input.bool(false, "顯示交叉線清單", group=gD)
+
+type Cross
+    int    x
+    float  y
+    int    dir          // -1 = 藍（碰到灰色上軌），1 = 紅（碰到灰色下軌）
+    string id
+    float  y0           // 原始價位
+    int    dir0         // 原始顏色
+    bool   hidden = false
+    bool   edited = false
+
+type Zone
+    float  bot
+    float  top
+    int    cnt
+    int    dir
+    string name = ""
+
+type Plan
+    bool   ok = false
+    int    dir          // -1 = 空單，1 = 多單
+    string how = ""
+    float  entry
+    float  sl
+    float  tp
+    float  be
+    float  dist
+    string why = ""
+
+f_bb(int len, float mult) =>
+    basis = ta.sma(close, len)
+    dev = mult * ta.stdev(close, len)
+    [basis + dev, basis - dev]
+
+pt = syminfo.mintick
+[aUpper, aLower] = f_bb(bbLen, bbMult)
+[bUpper, bLower] = request.security(syminfo.tickerid, secTf, f_bb(bbLen, bbMult), lookahead=barmerge.lookahead_off)
+atr    = ta.atr(atrLen)
+dStart = request.security(syminfo.tickerid, "D", time[dayWindow - 1], lookahead=barmerge.lookahead_on)
+fx     = request.currency_rate(acctCcy, syminfo.currency, ignore_invalid_currency=true)
+
+// ── 設定文字解析 ──
+// 去掉空白、全形符號轉半形、英文轉大寫，讓「b0519-09 ＝ 1.865」也能讀
+f_norm(string s) =>
+    string r = str.replace_all(s, " ", "")
+    r := str.replace_all(r, "，", ",")
+    r := str.replace_all(r, "、", ",")
+    r := str.replace_all(r, "＝", "=")
+    r := str.replace_all(r, "－", "-")
+    str.upper(r)
+
+f_list(string s) =>
+    s == "" ? array.new<string>() : str.split(f_norm(s), ",")
+
+// 從「鍵=值」清單找出某個鍵的值，找不到回傳空字串
+f_lookup(array<string> items, string key) =>
+    string v = ""
+    for it in items
+        array<string> kv = str.split(it, "=")
+        if array.size(kv) == 2 and array.get(kv, 0) == key
+            v := array.get(kv, 1)
+    v
+
+// 同一根 K 棒有兩條同色交叉時，後面的加上 _2、_3
+f_uniq(array<string> ids, string base) =>
+    string id = base
+    int k = 1
+    while array.includes(ids, id)
+        k += 1
+        id := base + "_" + str.tostring(k)
+    array.push(ids, id)
+    id
+
+// 灰線 a、黃線 b 在前一根(0)與這一根(1)之間是否相交；相交時回傳插值後的交點價
+f_cross(float a0, float b0, float a1, float b1) =>
+    bool hit = false
+    float y = na
+    if not na(a0) and not na(b0) and not na(a1) and not na(b1)
+        d0 = b0 - a0
+        d1 = b1 - a1
+        if d0 * d1 < 0 or (d1 == 0 and d0 != 0)
+            t = d0 / (d0 - d1)
+            y := a0 + t * (a1 - a0)
+            hit := true
+    [hit, y]
+
+// 由低到高掃描，同色線在「當前 ATR × zoneAtrMult」的寬度內達 zoneMin 條即成立一個密集區
+// （最下面那條到最上面那條超過 ATR 就不算密集區）；名稱依價位由低到高為 藍1、藍2…
+f_zones(array<float> px, int dir) =>
+    array<Zone> out = array.new<Zone>()
+    array<float> s = array.copy(px)
+    array.sort(s, order.ascending)
+    int n = array.size(s)
+    int i = 0
+    while i < n
+        float p0 = array.get(s, i)
+        int j = i
+        while j + 1 < n
+            if array.get(s, j + 1) - p0 > atr * zoneAtrMult
+                break
+            j += 1
+        if j - i + 1 >= zoneMin
+            string nm = (dir == -1 ? "藍" : "紅") + str.tostring(array.size(out) + 1)
+            array.push(out, Zone.new(p0, array.get(s, j), j - i + 1, dir, nm))
+            i := j + 1
+        else
+            i += 1
+    out
+
+f_filterZones(array<Zone> zs, array<string> hideZ) =>
+    array<Zone> out = array.new<Zone>()
+    for z in zs
+        if not array.includes(hideZ, z.name)
+            array.push(out, z)
+    out
+
+// 自訂密集區：「下緣-上緣藍」或「下緣-上緣紅」
+f_customZones(array<string> items, int dir) =>
+    array<Zone> out = array.new<Zone>()
+    string tag = dir == -1 ? "藍" : "紅"
+    for it in items
+        if str.contains(it, tag)
+            array<string> pr = str.split(str.replace_all(it, tag, ""), "-")
+            if array.size(pr) == 2
+                float a = str.tonumber(array.get(pr, 0))
+                float b = str.tonumber(array.get(pr, 1))
+                if not na(a) and not na(b)
+                    array.push(out, Zone.new(math.min(a, b), math.max(a, b), 0, dir, "自訂" + tag + str.tostring(array.size(out) + 1)))
+    out
+
+f_count(array<float> px, float lo, float hi) =>
+    int c = 0
+    for p in px
+        if p > lo and p < hi
+            c += 1
+    c
+
+f_hasZone(array<Zone> zones, float lo, float hi) =>
+    bool hit = false
+    for z in zones
+        if z.top > lo and z.bot < hi
+            hit := true
+    hit
+
+// 以指定進場價套用風控與空間區規則
+f_eval(int dir, float entry, string how, Zone z, array<Zone> zones, array<float> oppPx) =>
+    Plan p = Plan.new(dir=dir, how=how, entry=entry)
+    float minStop = math.max(minStopPts * pt, atr)
+    float maxStop = maxStopPts * pt
+    float dist = math.max(dir == -1 ? z.top + slBufPts * pt - entry : entry - (z.bot - slBufPts * pt), minStop)
+    p.dist := dist
+    p.sl := entry - dir * dist
+    p.tp := entry + dir * rr * dist
+    p.be := entry + dir * dist
+    // 空間區：防守區外緣（或進場價）到目標價之間
+    float lo = dir == -1 ? p.tp : math.max(entry, z.top)
+    float hi = dir == -1 ? math.min(entry, z.bot) : p.tp
+    if na(entry)
+        p.why := "無資料"
+    else if minStop > maxStop
+        p.why := "ATR 已超過止損上限，不交易"
+    else if dist > maxStop
+        p.why := "止損 " + str.tostring(math.round(dist / pt)) + " 點超過上限"
+    else if dir == -1 ? entry <= close : entry >= close
+        p.why := "現價已越過掛單價"
+    else if f_hasZone(zones, lo, hi)
+        p.why := "空間區內有密集區"
+    else if f_count(oppPx, lo, hi) > maxOpp
+        p.why := "空間區內異色線過多"
+    else
+        p.ok := true
+    p
+
+// 空單取現價上方最近的藍色密集區，多單取現價下方最近的紅色密集區
+f_plan(int dir, array<Zone> own, array<Zone> zones, array<float> oppPx) =>
+    Zone z = na
+    for c in own
+        if dir == -1 and c.top > close and (na(z) or c.bot < z.bot)
+            z := c
+        if dir == 1 and c.bot < close and (na(z) or c.top > z.top)
+            z := c
+    Plan res = Plan.new(dir=dir, why=dir == -1 ? "上方沒有藍色密集區" : "下方沒有紅色密集區")
+    if not na(z)
+        float m15 = dir == -1 ? bUpper : bLower
+        bool m15Near = dir == -1 ? m15 >= z.bot - m15NearPts * pt and m15 <= z.top : m15 <= z.top + m15NearPts * pt and m15 >= z.bot
+        float edge = dir == -1 ? z.bot - entryOffPts * pt : z.top + entryOffPts * pt
+        float mid = (z.bot + z.top) / 2
+        Plan pM = f_eval(dir, m15, "M15布林", z, zones, oppPx)
+        if not m15Near
+            pM.ok := false
+            pM.why := "M15布林離防守區太遠"
+        Plan pE = f_eval(dir, edge, "密集區邊緣", z, zones, oppPx)
+        Plan pC = f_eval(dir, mid, "密集區中間", z, zones, oppPx)
+        res := switch entryMode
+            "M15布林" => pM
+            "密集區邊緣" => pE
+            "密集區中間" => pC
+            => pM.ok ? pM : pE.ok ? pE : pC.ok ? pC : pE
+    [res, z]
+
+f_add(string s, string t) =>
+    s == "" ? t : s + "\n" + t
+
+// 檢查覆寫後的進場是否符合規則，回傳不符合的原因（空字串＝全部符合）
+f_check(int dir, float entry, float sl, float tp, array<Zone> zones, array<float> bluePx, array<float> redPx) =>
+    float dist = math.abs(entry - sl)
+    float minStop = math.max(minStopPts * pt, atr)
+    float maxStop = maxStopPts * pt
+    float lo = math.min(entry, tp)
+    float hi = math.max(entry, tp)
+    string why = ""
+    if dir == -1 ? sl <= entry : sl >= entry
+        why := f_add(why, "止損方向錯誤")
+    if dist < minStop
+        why := f_add(why, "止損 " + str.tostring(math.round(dist / pt)) + " 點，小於下限 " + str.tostring(math.round(minStop / pt)) + " 點")
+    if dist > maxStop
+        why := f_add(why, "止損 " + str.tostring(math.round(dist / pt)) + " 點，大於上限 " + str.tostring(maxStopPts) + " 點")
+    if dir == -1 ? tp >= entry : tp <= entry
+        why := f_add(why, "目標價方向錯誤")
+    else if math.abs(tp - entry) < rr * dist - pt / 2
+        why := f_add(why, "損益比不足 1:" + str.tostring(rr))
+    if dir == -1 ? entry <= close : entry >= close
+        why := f_add(why, "現價已越過掛單價")
+    bool zoneHit = false
+    for z in zones
+        // 進場價所在的同色密集區是防守區，不算在空間區內
+        bool isDef = z.dir == dir and z.bot <= entry and z.top >= entry
+        if not isDef and z.top > lo and z.bot < hi
+            zoneHit := true
+    if zoneHit
+        why := f_add(why, "空間區內有密集區")
+    if f_count(dir == -1 ? redPx : bluePx, lo, hi) > maxOpp
+        why := f_add(why, "空間區內異色線過多")
+    why
+
+// 套用設定裡的進場覆寫；三個都是 0 時維持自動結果
+f_override(Plan base, int dir, float oE, float oS, float oT, array<Zone> zones, array<float> bluePx, array<float> redPx) =>
+    Plan res = base
+    if oE > 0 or oS > 0 or oT > 0
+        float e = oE > 0 ? oE : base.entry
+        float s = oS > 0 ? oS : base.sl
+        res := Plan.new(dir=dir, how="手動修改")
+        if na(e) or na(s)
+            res.why := "沒有自動值，請同時填進場與止損"
+        else
+            float d = math.abs(e - s)
+            float t = oT > 0 ? oT : e + dir * rr * d
+            res.entry := e
+            res.sl := s
+            res.tp := t
+            res.dist := d
+            res.be := e + dir * d
+            res.why := f_check(dir, e, s, t, zones, bluePx, redPx)
+            res.ok := res.why == ""
+    res
+
+var array<line>  gLines  = array.new<line>()
+var array<box>   gBoxes  = array.new<box>()
+var array<label> gLabels = array.new<label>()
+var table tb    = table.new(position.top_right, 3, 9, bgcolor=color.new(color.black, 20), border_color=color.gray, border_width=1)
+var table tHint = table.new(position.bottom_center, 1, 1, bgcolor=color.new(color.black, 20))
+var table tZone = table.new(position.bottom_right, 5, 30, bgcolor=color.new(color.black, 20), border_color=color.gray, border_width=1)
+var table tRay  = table.new(position.bottom_left, 3, 101, bgcolor=color.new(color.black, 20), border_color=color.gray, border_width=1)
+var string lastKey = ""
+
+f_rrTxt(Plan p) =>
+    "1:" + str.tostring(math.abs(p.tp - p.entry) / p.dist, "#.##")
+
+f_drawPlan(Plan p) =>
+    int x1 = bar_index + 1
+    int x2 = bar_index + planBars
+    array.push(gBoxes, box.new(x1, math.max(p.entry, p.sl), x2, math.min(p.entry, p.sl), border_color=color.new(color.red, 50), bgcolor=color.new(color.red, 80)))
+    array.push(gBoxes, box.new(x1, math.max(p.entry, p.tp), x2, math.min(p.entry, p.tp), border_color=color.new(color.teal, 50), bgcolor=color.new(color.teal, 80)))
+    array.push(gLines, line.new(x1, p.entry, x2, p.entry, color=color.gray, width=2))
+    if showBE
+        array.push(gLines, line.new(x1, p.be, x2, p.be, color=color.teal, style=line.style_dashed))
+    string side = p.dir == -1 ? "Sell Limit " : "Buy Limit "
+    array.push(gLabels, label.new(x2, p.entry, side + str.tostring(p.entry, format.mintick) + "（" + p.how + "）", style=label.style_label_left, color=color.gray, textcolor=color.white, size=size.small))
+    array.push(gLabels, label.new(x2, p.sl, "SL " + str.tostring(p.sl, format.mintick) + "  " + str.tostring(math.round(p.dist / pt)) + "點", style=label.style_label_left, color=color.red, textcolor=color.white, size=size.small))
+    array.push(gLabels, label.new(x2, p.tp, "TP " + str.tostring(p.tp, format.mintick) + "  " + f_rrTxt(p), style=label.style_label_left, color=color.teal, textcolor=color.white, size=size.small))
+
+f_zoneTxt(Zone z) =>
+    string s = "—"
+    if not na(z)
+        s := z.name + " " + str.tostring(z.bot, format.mintick) + "–" + str.tostring(z.top, format.mintick)
+    s
+
+f_fill(int col, Plan p, Zone z) =>
+    color tc = p.ok ? color.white : color.gray
+    bool has = not na(p.entry) and not na(p.dist) and p.dist > 0
+    float riskAmt = acctSize * riskPct / 100
+    float lots = na(fx) or not has ? na : riskAmt * fx / p.dist / 100000
+    table.cell(tb, col, 1, f_zoneTxt(z), text_color=tc, text_size=size.small)
+    table.cell(tb, col, 2, p.ok ? "可掛單" : p.why, text_color=p.ok ? color.lime : color.orange, text_size=size.small)
+    table.cell(tb, col, 3, has ? (p.dir == -1 ? "Sell Limit " : "Buy Limit ") + str.tostring(p.entry, format.mintick) + "（" + p.how + "）" : "—", text_color=tc, text_size=size.small)
+    table.cell(tb, col, 4, has ? str.tostring(p.sl, format.mintick) + "（" + str.tostring(math.round(p.dist / pt)) + "點）" : "—", text_color=tc, text_size=size.small)
+    table.cell(tb, col, 5, has ? str.tostring(p.tp, format.mintick) + "（" + str.tostring(math.round(math.abs(p.tp - p.entry) / pt)) + "點，" + f_rrTxt(p) + "）" : "—", text_color=tc, text_size=size.small)
+    table.cell(tb, col, 6, has ? str.tostring(p.be, format.mintick) : "—", text_color=tc, text_size=size.small)
+    table.cell(tb, col, 7, has ? str.tostring(lots, "#.##") + " 手（風險 " + str.tostring(riskAmt, "#.##") + " " + acctCcy + "）" : "—", text_color=tc, text_size=size.small)
+
+if barstate.islast
+    for l in gLines
+        line.delete(l)
+    for b in gBoxes
+        box.delete(b)
+    for lb in gLabels
+        label.delete(lb)
+    array.clear(gLines)
+    array.clear(gBoxes)
+    array.clear(gLabels)
+
+    // 收集最近 dayWindow 根日K內的交叉線，編號＝顏色＋交叉左邊那根 K 棒的「月日-時」
+    array<Cross> crosses = array.new<Cross>()
+    array<string> ids = array.new<string>()
+    int winX = bar_index
+    int n = math.min(499, bar_index)
+    if n > 0
+        for i = 0 to n - 1
+            if time[i] < dStart
+                break
+            int xL = bar_index - i - 1
+            winX := xL
+            string tStr = str.format_time(time[i + 1], "MMdd-HH", syminfo.timezone)
+            [h1, y1] = f_cross(aUpper[i + 1], bUpper[i + 1], aUpper[i], bUpper[i])
+            [h2, y2] = f_cross(aUpper[i + 1], bLower[i + 1], aUpper[i], bLower[i])
+            [h3, y3] = f_cross(aLower[i + 1], bLower[i + 1], aLower[i], bLower[i])
+            [h4, y4] = f_cross(aLower[i + 1], bUpper[i + 1], aLower[i], bUpper[i])
+            if h1
+                array.push(crosses, Cross.new(xL, y1, -1, f_uniq(ids, "B" + tStr), y1, -1))
+            if h2
+                array.push(crosses, Cross.new(xL, y2, -1, f_uniq(ids, "B" + tStr), y2, -1))
+            if h3
+                array.push(crosses, Cross.new(xL, y3, 1, f_uniq(ids, "R" + tStr), y3, 1))
+            if h4
+                array.push(crosses, Cross.new(xL, y4, 1, f_uniq(ids, "R" + tStr), y4, 1))
+
+    // 套用「個別控制」：隱藏、改價位、改顏色
+    array<string> hideL = f_list(hideRays)
+    array<string> moveL = f_list(moveRays)
+    array<string> colL  = f_list(recolorRays)
+    for c in crosses
+        if array.includes(hideL, c.id)
+            c.hidden := true
+        string mv = f_lookup(moveL, c.id)
+        if mv != "" and not na(str.tonumber(mv))
+            c.y := str.tonumber(mv)
+            c.edited := true
+        string cl = f_lookup(colL, c.id)
+        if cl == "紅" or cl == "R"
+            c.dir := 1
+            c.edited := true
+        else if cl == "藍" or cl == "B"
+            c.dir := -1
+            c.edited := true
+
+    array<float> bluePx = array.new<float>()
+    array<float> redPx = array.new<float>()
+    for c in crosses
+        if applyEdits
+            if not c.hidden
+                array.push(c.dir == -1 ? bluePx : redPx, c.y)
+        else
+            array.push(c.dir0 == -1 ? bluePx : redPx, c.y0)
+
+    array<string> hideZ = f_list(hideZones)
+    array<string> addZ  = f_list(addZones)
+    array<Zone> blueZ = array.concat(f_filterZones(f_zones(bluePx, -1), hideZ), f_customZones(addZ, -1))
+    array<Zone> redZ  = array.concat(f_filterZones(f_zones(redPx, 1), hideZ), f_customZones(addZ, 1))
+    array<Zone> allZ  = array.concat(array.copy(blueZ), redZ)
+
+    [psAuto, zs] = f_plan(-1, blueZ, allZ, redPx)
+    [plAuto, zl] = f_plan(1, redZ, allZ, bluePx)
+    Plan ps = f_override(psAuto, -1, sEntryIn, sSLIn, sTPIn, allZ, bluePx, redPx)
+    Plan pl = f_override(plAuto, 1, lEntryIn, lSLIn, lTPIn, allZ, bluePx, redPx)
+
+    if showRays
+        for c in crosses
+            if not c.hidden or showHidden
+                color rc = c.hidden ? color.gray : c.dir == -1 ? color.blue : color.red
+                array.push(gLines, line.new(c.x, c.y, c.x + 1, c.y, extend=extend.right, color=color.new(rc, 30), width=1, style=c.hidden ? line.style_dotted : line.style_solid))
+                if showRayLbl
+                    string tag = c.hidden ? "（隱藏）" : c.edited ? " ✎" : ""
+                    array.push(gLabels, label.new(c.x, c.y, c.id + " " + str.tostring(c.y, format.mintick) + tag, style=label.style_label_lower_left, color=color.new(rc, 100), textcolor=rc, size=size.tiny))
+
+    if showZones
+        for z in allZ
+            color zc = z.dir == -1 ? color.blue : color.red
+            array.push(gBoxes, box.new(winX, z.top, bar_index + planBars, z.bot, border_color=color.new(zc, 20), border_style=line.style_dashed, bgcolor=color.new(zc, 90)))
+            array.push(gLabels, label.new(winX, z.top, z.name + "  " + str.tostring(z.bot, format.mintick) + "–" + str.tostring(z.top, format.mintick) + (z.cnt > 0 ? "（" + str.tostring(z.cnt) + "條）" : ""), style=label.style_label_lower_left, color=color.new(zc, 100), textcolor=zc, size=size.small))
+
+    if showPlan and ps.ok
+        f_drawPlan(ps)
+    if showPlan and pl.ok
+        f_drawPlan(pl)
+
+    if showTable
+        table.clear(tb, 0, 0, 2, 8)
+        table.cell(tb, 0, 0, "", text_size=size.small)
+        table.cell(tb, 1, 0, "空單（藍防守）", text_color=color.blue, text_size=size.small)
+        table.cell(tb, 2, 0, "多單（紅防守）", text_color=color.red, text_size=size.small)
+        table.cell(tb, 0, 1, "防守區", text_color=color.white, text_size=size.small)
+        table.cell(tb, 0, 2, "狀態", text_color=color.white, text_size=size.small)
+        table.cell(tb, 0, 3, "進場", text_color=color.white, text_size=size.small)
+        table.cell(tb, 0, 4, "止損", text_color=color.white, text_size=size.small)
+        table.cell(tb, 0, 5, "目標", text_color=color.white, text_size=size.small)
+        table.cell(tb, 0, 6, "保本 1R", text_color=color.white, text_size=size.small)
+        table.cell(tb, 0, 7, "手數", text_color=color.white, text_size=size.small)
+        f_fill(1, ps, zs)
+        f_fill(2, pl, zl)
+        table.cell(tb, 0, 8, "H4 ATR", text_color=color.white, text_size=size.small)
+        table.cell(tb, 1, 8, str.tostring(math.round(atr / pt)) + " 點", text_color=color.white, text_size=size.small)
+        table.cell(tb, 2, 8, timeframe.period == "240" ? "藍密集 " + str.tostring(array.size(blueZ)) + "｜紅密集 " + str.tostring(array.size(redZ)) : "⚠ 請切到 H4", text_color=timeframe.period == "240" ? color.white : color.orange, text_size=size.small)
+        table.cell(tHint, 0, 0, "用圖上的編號到設定「個別控制」隱藏、改價、改色；進場價可在「進場覆寫」修改", text_color=color.silver, text_size=size.small)
+
+    if showZoneList
+        table.clear(tZone, 0, 0, 4, 29)
+        table.cell(tZone, 0, 0, "密集區", text_color=color.white, text_size=size.small)
+        table.cell(tZone, 1, 0, "下緣", text_color=color.white, text_size=size.small)
+        table.cell(tZone, 2, 0, "上緣", text_color=color.white, text_size=size.small)
+        table.cell(tZone, 3, 0, "條數", text_color=color.white, text_size=size.small)
+        table.cell(tZone, 4, 0, "寬度", text_color=color.white, text_size=size.small)
+        if array.size(allZ) == 0
+            table.cell(tZone, 0, 1, "目前沒有密集區", text_color=color.gray, text_size=size.small)
+        for [k, z] in allZ
+            if k < 29
+                color zc = z.dir == -1 ? color.blue : color.red
+                table.cell(tZone, 0, k + 1, z.name, text_color=zc, text_size=size.small)
+                table.cell(tZone, 1, k + 1, str.tostring(z.bot, format.mintick), text_color=color.white, text_size=size.small)
+                table.cell(tZone, 2, k + 1, str.tostring(z.top, format.mintick), text_color=color.white, text_size=size.small)
+                table.cell(tZone, 3, k + 1, z.cnt > 0 ? str.tostring(z.cnt) : "自訂", text_color=color.white, text_size=size.small)
+                table.cell(tZone, 4, k + 1, str.tostring(math.round((z.top - z.bot) / pt)) + "點", text_color=color.white, text_size=size.small)
+
+    if showRayList
+        table.clear(tRay, 0, 0, 2, 100)
+        table.cell(tRay, 0, 0, "編號", text_color=color.white, text_size=size.tiny)
+        table.cell(tRay, 1, 0, "價位（高→低）", text_color=color.white, text_size=size.tiny)
+        table.cell(tRay, 2, 0, "狀態", text_color=color.white, text_size=size.tiny)
+        int nCross = array.size(crosses)
+        if nCross > 0
+            array<float> ys = array.new<float>()
+            for c in crosses
+                array.push(ys, c.y)
+            array<int> idxs = array.sort_indices(ys, order.descending)
+            for r = 0 to math.min(nCross, 100) - 1
+                Cross cr = array.get(crosses, array.get(idxs, r))
+                color rc = cr.hidden ? color.gray : cr.dir == -1 ? color.blue : color.red
+                table.cell(tRay, 0, r + 1, cr.id, text_color=rc, text_size=size.tiny)
+                table.cell(tRay, 1, r + 1, str.tostring(cr.y, format.mintick), text_color=color.white, text_size=size.tiny)
+                table.cell(tRay, 2, r + 1, cr.hidden ? "隱藏" : cr.edited ? "已修改" : "", text_color=color.silver, text_size=size.tiny)
+
+    // 出現新的可掛單規劃時發警報（需在圖上建立「任何 alert() 函數呼叫」的警報）
+    string key = (ps.ok ? "S" + str.tostring(ps.entry, format.mintick) : "") + (pl.ok ? "L" + str.tostring(pl.entry, format.mintick) : "")
+    if barstate.isrealtime and key != "" and key != lastKey
+        string msg = syminfo.ticker
+        if ps.ok
+            msg += " Sell Limit " + str.tostring(ps.entry, format.mintick) + " SL " + str.tostring(ps.sl, format.mintick) + " TP " + str.tostring(ps.tp, format.mintick)
+        if pl.ok
+            msg += " Buy Limit " + str.tostring(pl.entry, format.mintick) + " SL " + str.tostring(pl.sl, format.mintick) + " TP " + str.tostring(pl.tp, format.mintick)
+        alert(msg, alert.freq_once_per_bar)
+    lastKey := key
