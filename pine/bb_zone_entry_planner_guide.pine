@@ -42,7 +42,7 @@ riskPct    = input.float(1.0, "單筆風險 %", minval=0.1, maxval=5, step=0.1, 
 
 gD = "顯示"
 showPlan     = input.bool(false, "畫出規劃框（參考用，不能拖動）", group=gD)
-planBars  = input.int(30, "規劃框長度（K棒）", minval=5, maxval=200, group=gD)
+planBars     = input.int(30, "規劃框長度（K棒）", minval=5, maxval=200, group=gD)
 showTable    = input.bool(true, "顯示進場資訊表", group=gD)
 showZoneList = input.bool(true, "顯示密集區清單", group=gD)
 showRayList  = input.bool(false, "顯示交叉線價位清單", group=gD)
@@ -348,11 +348,11 @@ if barstate.islast
             array<int> idxs = array.sort_indices(ys, order.descending)
             for r = 0 to math.min(nCross, 100) - 1
                 int k = array.get(idxs, r)
-                Cross c = array.get(crosses, k)
-                color rc = c.dir == -1 ? color.blue : color.red
+                Cross cr = array.get(crosses, k)
+                color rc = cr.dir == -1 ? color.blue : color.red
                 table.cell(tRay, 0, r + 1, "#" + str.tostring(nCross - k), text_color=rc, text_size=size.tiny)
-                table.cell(tRay, 1, r + 1, c.dir == -1 ? "藍" : "紅", text_color=rc, text_size=size.tiny)
-                table.cell(tRay, 2, r + 1, str.tostring(c.y, format.mintick), text_color=color.white, text_size=size.tiny)
+                table.cell(tRay, 1, r + 1, cr.dir == -1 ? "藍" : "紅", text_color=rc, text_size=size.tiny)
+                table.cell(tRay, 2, r + 1, str.tostring(cr.y, format.mintick), text_color=color.white, text_size=size.tiny)
 
     // 出現新的可掛單規劃時發警報（需在圖上建立「任何 alert() 函數呼叫」的警報）
     string key = (ps.ok ? "S" + str.tostring(ps.entry, format.mintick) : "") + (pl.ok ? "L" + str.tostring(pl.entry, format.mintick) : "")
