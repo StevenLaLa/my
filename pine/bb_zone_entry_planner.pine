@@ -4,7 +4,8 @@ indicator("密集區空間區進場規劃", overlay=true, max_lines_count=500, m
 // 依「雙時間框布林帶交叉投影」的交叉線找出：
 // 1) 密集區（防守帶）：同色交叉線 ≥ N 條，且最下面與最上面那條的距離 ≤ 當前 H4 ATR。藍＝空單防守、紅＝多單防守。
 // 2) 空間區（目標帶）：進場到目標之間不能有任何密集區，異色線不能太多。
-// 3) 依風控規則算出 Sell Limit / Buy Limit 的進場、止損、目標，畫在圖表右側。
+// 3) 依風控規則算出 Sell Limit / Buy Limit 的進場、止損、目標，列在資訊表並可畫在圖表右側。
+// 指標畫的框不能拖動：要手動微調時，照資訊表的價位用內建「多頭／空頭部位」工具畫。
 // 1 點 = syminfo.mintick（GBPCAD 為 0.00001）。請在 H4 圖表使用。
 
 gX = "交叉線"
@@ -15,10 +16,10 @@ dayWindow = input.int(15, "交叉時間範圍（最近幾根日K）", minval=1, 
 showRays  = input.bool(true, "顯示交叉射線", group=gX)
 
 gZ = "密集區／空間區"
-zoneMin    = input.int(4, "密集區最少同色線數", minval=2, group=gZ)
+zoneMin     = input.int(4, "密集區最少同色線數", minval=2, group=gZ)
 zoneAtrMult = input.float(1.0, "密集區寬度上限（ATR 倍數）", minval=0.1, step=0.1, group=gZ)
-maxOpp     = input.int(2, "空間區內異色線上限", minval=0, group=gZ)
-showZones  = input.bool(true, "顯示密集區", group=gZ)
+maxOpp      = input.int(2, "空間區內異色線上限", minval=0, group=gZ)
+showZones   = input.bool(true, "顯示密集區", group=gZ)
 
 gE = "進場"
 entryMode   = input.string("自動", "進場價", options=["自動", "M15布林", "密集區邊緣", "密集區中間"], group=gE)
@@ -37,6 +38,7 @@ acctCcy    = input.string("USD", "本金幣別", options=["USD", "EUR", "GBP", "
 riskPct    = input.float(1.0, "單筆風險 %", minval=0.1, maxval=5, step=0.1, group=gR)
 
 gD = "顯示"
+showPlan  = input.bool(true, "畫出規劃框（關掉就只看表格，自己用部位工具畫）", group=gD)
 planBars  = input.int(30, "規劃框長度（K棒）", minval=5, maxval=200, group=gD)
 showTable = input.bool(true, "顯示資訊表", group=gD)
 
@@ -183,6 +185,7 @@ var array<line>  gLines  = array.new<line>()
 var array<box>   gBoxes  = array.new<box>()
 var array<label> gLabels = array.new<label>()
 var table tb = table.new(position.top_right, 3, 9, bgcolor=color.new(color.black, 20), border_color=color.gray, border_width=1)
+var table tHint = table.new(position.bottom_right, 1, 1, bgcolor=color.new(color.black, 20))
 var string lastKey = ""
 
 f_drawPlan(Plan p) =>
@@ -212,7 +215,7 @@ f_fill(int col, Plan p, Zone z) =>
     table.cell(tb, col, 2, p.ok ? "可掛單" : p.why, text_color=p.ok ? color.lime : color.orange, text_size=size.small)
     table.cell(tb, col, 3, p.ok ? (p.dir == -1 ? "Sell Limit " : "Buy Limit ") + str.tostring(p.entry, format.mintick) + "（" + p.how + "）" : "—", text_color=tc, text_size=size.small)
     table.cell(tb, col, 4, p.ok ? str.tostring(p.sl, format.mintick) + "（" + str.tostring(math.round(p.dist / pt)) + "點）" : "—", text_color=tc, text_size=size.small)
-    table.cell(tb, col, 5, p.ok ? str.tostring(p.tp, format.mintick) : "—", text_color=tc, text_size=size.small)
+    table.cell(tb, col, 5, p.ok ? str.tostring(p.tp, format.mintick) + "（" + str.tostring(math.round(rr * p.dist / pt)) + "點）" : "—", text_color=tc, text_size=size.small)
     table.cell(tb, col, 6, p.ok ? str.tostring(p.be, format.mintick) : "—", text_color=tc, text_size=size.small)
     table.cell(tb, col, 7, p.ok ? str.tostring(lots, "#.##") + " 手（風險 " + str.tostring(riskAmt, "#.##") + " " + acctCcy + "）" : "—", text_color=tc, text_size=size.small)
 
@@ -273,9 +276,9 @@ if barstate.islast
             array.push(gBoxes, box.new(winX, z.top, bar_index + planBars, z.bot, border_color=color.new(zc, 40), bgcolor=color.new(zc, 85)))
             array.push(gLabels, label.new(winX, z.top, (z.dir == -1 ? "藍密集 " : "紅密集 ") + str.tostring(z.cnt) + "條", style=label.style_label_lower_left, color=color.new(zc, 100), textcolor=zc, size=size.small))
 
-    if ps.ok
+    if showPlan and ps.ok
         f_drawPlan(ps)
-    if pl.ok
+    if showPlan and pl.ok
         f_drawPlan(pl)
 
     if showTable
@@ -295,6 +298,7 @@ if barstate.islast
         table.cell(tb, 0, 8, "H4 ATR", text_color=color.white, text_size=size.small)
         table.cell(tb, 1, 8, str.tostring(math.round(atr / pt)) + " 點", text_color=color.white, text_size=size.small)
         table.cell(tb, 2, 8, timeframe.period == "240" ? "藍密集 " + str.tostring(array.size(blueZ)) + "｜紅密集 " + str.tostring(array.size(redZ)) : "⚠ 請切到 H4", text_color=timeframe.period == "240" ? color.white : color.orange, text_size=size.small)
+        table.cell(tHint, 0, 0, "要手動拖動：用左側「多頭／空頭部位」工具，點兩下框，填入資訊表的進場、止損、目標價", text_color=color.silver, text_size=size.small)
 
     // 出現新的可掛單規劃時發警報（需在圖上建立「任何 alert() 函數呼叫」的警報）
     string key = (ps.ok ? "S" + str.tostring(ps.entry, format.mintick) : "") + (pl.ok ? "L" + str.tostring(pl.entry, format.mintick) : "")
