@@ -2,7 +2,7 @@
 indicator("密集區空間區進場規劃", overlay=true, max_lines_count=500, max_boxes_count=100, max_labels_count=100, max_bars_back=500)
 
 // 依「雙時間框布林帶交叉投影」的交叉線找出：
-// 1) 密集區（防守帶）：同色交叉線在一定價格寬度內 ≥ N 條。藍＝空單防守、紅＝多單防守。
+// 1) 密集區（防守帶）：同色交叉線 ≥ N 條，且最下面與最上面那條的距離 ≤ 當前 H4 ATR。藍＝空單防守、紅＝多單防守。
 // 2) 空間區（目標帶）：進場到目標之間不能有任何密集區，異色線不能太多。
 // 3) 依風控規則算出 Sell Limit / Buy Limit 的進場、止損、目標，畫在圖表右側。
 // 1 點 = syminfo.mintick（GBPCAD 為 0.00001）。請在 H4 圖表使用。
@@ -16,7 +16,7 @@ showRays  = input.bool(true, "顯示交叉射線", group=gX)
 
 gZ = "密集區／空間區"
 zoneMin    = input.int(4, "密集區最少同色線數", minval=2, group=gZ)
-zoneWidPts = input.int(250, "密集區價格寬度上限（點）", minval=1, group=gZ)
+zoneAtrMult = input.float(1.0, "密集區寬度上限（ATR 倍數）", minval=0.1, step=0.1, group=gZ)
 maxOpp     = input.int(2, "空間區內異色線上限", minval=0, group=gZ)
 showZones  = input.bool(true, "顯示密集區", group=gZ)
 
@@ -87,7 +87,8 @@ f_cross(float a0, float b0, float a1, float b1) =>
             hit := true
     [hit, y]
 
-// 由低到高掃描，同色線在 zoneWidPts 內達 zoneMin 條即成立一個密集區
+// 由低到高掃描，同色線在「當前 ATR × zoneAtrMult」的寬度內達 zoneMin 條即成立一個密集區
+// （最下面那條到最上面那條超過 ATR 就不算密集區）
 f_zones(array<float> px, int dir) =>
     array<Zone> out = array.new<Zone>()
     array<float> s = array.copy(px)
@@ -98,7 +99,7 @@ f_zones(array<float> px, int dir) =>
         float p0 = array.get(s, i)
         int j = i
         while j + 1 < n
-            if array.get(s, j + 1) - p0 > zoneWidPts * pt
+            if array.get(s, j + 1) - p0 > atr * zoneAtrMult
                 break
             j += 1
         if j - i + 1 >= zoneMin
