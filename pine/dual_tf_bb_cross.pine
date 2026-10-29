@@ -1,0 +1,80 @@
+//@version=6
+indicator("雙時間框布林帶交叉投影", overlay=true, max_lines_count=500, max_bars_back=500)
+
+// 比較兩組布林帶：
+// A（灰）：圖表週期布林帶
+// B（黃）：第二組時間框（預設 15 分）布林帶，投影到圖表上
+// 在最近 N 根 K 棒內找出黃線與灰線的交點，從交點左邊那根 K 棒畫向右射線（射線一定穿過交點）。
+// 碰到灰色上軌 → 藍色射線；碰到灰色下軌 → 紅色射線。
+
+bbLen        = input.int(20, "布林帶長度", minval=1)
+bbMult       = input.float(2.0, "標準差倍數", minval=0.1, step=0.1)
+secTf        = input.timeframe("15", "第二組時間框")
+lookbackBars = input.int(90, "回看K棒數", minval=2, maxval=500)
+crossMode    = input.string("黃線任一條碰到灰線", "交叉判定", options=["黃線任一條碰到灰線", "只看同側（上對上、下對下）"])
+upperColor   = input.color(color.blue, "灰色上軌交叉顏色")
+lowerColor   = input.color(color.red, "灰色下軌交叉顏色")
+lineWidth    = input.int(2, "線條粗細", minval=1, maxval=5)
+showUpper    = input.bool(true, "顯示上軌交叉")
+showLower    = input.bool(true, "顯示下軌交叉")
+showDebug    = input.bool(false, "顯示腳本算出的第二組BB（核對用）")
+
+f_bb(int len, float mult) =>
+    basis = ta.sma(close, len)
+    dev = mult * ta.stdev(close, len)
+    [basis + dev, basis - dev]
+
+// 系列 A：圖表週期
+[aUpper, aLower] = f_bb(bbLen, bbMult)
+
+// 系列 B：第二組時間框。用 close（不是 close[1]），才會跟圖上內建 BB 的黃線完全一致
+[bUpper, bLower] = request.security(syminfo.tickerid, secTf, f_bb(bbLen, bbMult), lookahead=barmerge.lookahead_off)
+
+plot(showDebug ? bUpper : na, "腳本第二組上軌", color.orange, 1)
+plot(showDebug ? bLower : na, "腳本第二組下軌", color.orange, 1)
+
+// 灰線 a、黃線 b 在前一根(0)與這一根(1)之間是否相交；相交時回傳插值後的交點價
+f_cross(float a0, float b0, float a1, float b1) =>
+    bool hit = false
+    float y = na
+    if not na(a0) and not na(b0) and not na(a1) and not na(b1)
+        d0 = b0 - a0
+        d1 = b1 - a1
+        // 異號＝穿過；這一根剛好相等也算（碰到即算相交），下一段 d0 = 0 時不會重複計算
+        if d0 * d1 < 0 or (d1 == 0 and d0 != 0)
+            t = d0 / (d0 - d1)
+            y := a0 + t * (a1 - a0)
+            hit := true
+    [hit, y]
+
+var line[] rays = array.new_line()
+
+f_ray(int x, float y, color c) =>
+    array.push(rays, line.new(x, y, x + 1, y, xloc=xloc.bar_index, extend=extend.right, color=c, width=lineWidth))
+
+if barstate.islast
+    for l in rays
+        line.delete(l)
+    array.clear(rays)
+
+    allMode = crossMode == "黃線任一條碰到灰線"
+    n = math.min(lookbackBars - 1, bar_index)
+    if n > 0
+        for i = 0 to n - 1
+            xL = bar_index - i - 1
+            if showUpper
+                [h1, y1] = f_cross(aUpper[i + 1], bUpper[i + 1], aUpper[i], bUpper[i])
+                if h1
+                    f_ray(xL, y1, upperColor)
+                if allMode
+                    [h2, y2] = f_cross(aUpper[i + 1], bLower[i + 1], aUpper[i], bLower[i])
+                    if h2
+                        f_ray(xL, y2, upperColor)
+            if showLower
+                [h3, y3] = f_cross(aLower[i + 1], bLower[i + 1], aLower[i], bLower[i])
+                if h3
+                    f_ray(xL, y3, lowerColor)
+                if allMode
+                    [h4, y4] = f_cross(aLower[i + 1], bUpper[i + 1], aLower[i], bUpper[i])
+                    if h4
+                        f_ray(xL, y4, lowerColor)
